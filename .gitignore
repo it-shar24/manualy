@@ -11,4 +11,5 @@ chroma_db/
 .DS_Store
 EOT
 
-touch data/uploads/.gitkeep data/extracted_images/.gitkeep
+touch data/uploads/.gitkeep data/extracted_images/.gitkeepfrontend/node_modules/
+frontend/dist/

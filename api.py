@@ -4,6 +4,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from pathlib import Path
 import shutil
+import glob
 
 from src.ingestion.pdf_parser import PDFManualParser
 from src.ingestion.chunker import HybridManualChunker
@@ -13,7 +14,6 @@ from src.config import UPLOADS_DIR, EXTRACTED_IMAGES_DIR
 
 app = FastAPI(title="Manualy API")
 
-# Enable CORS for Lovable local dev and production domains
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -22,7 +22,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Serve extracted diagrams directly to the React frontend
 app.mount("/images", StaticFiles(directory=str(EXTRACTED_IMAGES_DIR)), name="images")
 
 vector_store = ManualVectorStore()
@@ -31,6 +30,19 @@ rag_engine = ManualyRAGEngine(vector_store=vector_store)
 class ChatRequest(BaseModel):
     query: str
     user_id: str = "demo_user"
+
+@app.get("/api/gallery")
+async def get_full_gallery():
+    """Returns all extracted images across all uploaded manuals."""
+    gallery = []
+    for img_path in sorted(EXTRACTED_IMAGES_DIR.glob("**/*.*")):
+        if img_path.suffix.lower() in [".png", ".jpg", ".jpeg"]:
+            gallery.append({
+                "doc_id": img_path.parent.name,
+                "filename": img_path.name,
+                "url": f"http://localhost:8000/images/{img_path.parent.name}/{img_path.name}"
+            })
+    return {"gallery": gallery}
 
 @app.post("/api/upload")
 async def upload_manual(file: UploadFile = File(...)):
@@ -48,12 +60,10 @@ async def upload_manual(file: UploadFile = File(...)):
     chunks = chunker.create_chunks(parsed, user_id="demo_user")
     vector_store.index_chunks(chunks)
     
-    # Map image paths to web-accessible URLs
     gallery = []
     for page in parsed["pages"]:
         for img_path in page["image_paths"]:
             p = Path(img_path)
-            # URL: /images/<doc_id>/<filename>
             gallery.append({
                 "page": page["page_number"],
                 "url": f"http://localhost:8000/images/{p.parent.name}/{p.name}"
@@ -72,7 +82,6 @@ async def upload_manual(file: UploadFile = File(...)):
 async def chat_endpoint(req: ChatRequest):
     result = rag_engine.answer_question(query=req.query, user_id=req.user_id)
     
-    # Convert local evidence image paths to static URLs
     visual_evidence_urls = []
     for img_path in result.get("visual_evidence", []):
         p = Path(img_path)
