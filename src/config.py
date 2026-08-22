@@ -19,7 +19,7 @@ CHROMA_PERSIST_DIR.mkdir(parents=True, exist_ok=True)
 # Local Ollama Settings
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "qwen2.5vl:3b")
-OLLAMA_TEXT_MODEL = os.getenv("OLLAMA_TEXT_MODEL", "qwen2.5vl:3b")
+OLLAMA_TEXT_MODEL = os.getenv("OLLAMA_TEXT_MODEL", "llama3.2:3b")
 
 # Embedding Model (Runs locally on CPU)
 EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
