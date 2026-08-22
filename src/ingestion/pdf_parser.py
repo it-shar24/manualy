@@ -1,83 +1,69 @@
-import pymupdf as fitz  # PyMuPDF
-import os
+import pymupdf as fitz
 from pathlib import Path
 from typing import Dict, Any, List
-from PIL import Image
-import io
-from src.config import EXTRACTED_IMAGES_DIR, MIN_IMAGE_WIDTH, MIN_IMAGE_HEIGHT
+from src.config import EXTRACTED_IMAGES_DIR
 
 class PDFManualParser:
-    def __init__(self, pdf_path: str):
+    def __init__(self, pdf_path: str, min_image_dim: int = 100):
         self.pdf_path = Path(pdf_path)
-        if not self.pdf_path.exists():
-            raise FileNotFoundError(f"PDF file not found: {self.pdf_path}")
-            
-        self.doc = fitz.open(self.pdf_path)
+        self.min_image_dim = min_image_dim
         self.doc_id = self.pdf_path.stem
-        self.image_save_dir = EXTRACTED_IMAGES_DIR / self.doc_id
-        self.image_save_dir.mkdir(parents=True, exist_ok=True)
+        self.output_dir = EXTRACTED_IMAGES_DIR / self.doc_id
+        self.output_dir.mkdir(parents=True, exist_ok=True)
 
     def extract(self) -> Dict[str, Any]:
-        """
-        Parses the PDF and extracts structured page-level text, 
-        raster images, and vector diagram snapshots.
-        """
+        doc = fitz.open(str(self.pdf_path))
         pages_data: List[Dict[str, Any]] = []
-        total_extracted_images = 0
+        total_images = 0
 
-        for page_num in range(len(self.doc)):
-            page = self.doc[page_num]
+        for page_index in range(len(doc)):
+            page = doc[page_index]
+            page_num = page_index + 1
             text = page.get_text("text").strip()
-            
-            extracted_images: List[str] = []
-            image_list = page.get_images(full=True)
+            image_paths: List[str] = []
 
-            # 1. Extract embedded raster images
+            # 1. Check for raster images
+            image_list = page.get_images(full=True)
+            
             for img_index, img_meta in enumerate(image_list):
                 xref = img_meta[0]
-                base_image = self.doc.extract_image(xref)
-                image_bytes = base_image["image"]
-                image_ext = base_image["ext"]
+                base_image = doc.extract_image(xref)
+                if base_image:
+                    width = base_image.get("width", 0)
+                    height = base_image.get("height", 0)
+                    
+                    if width >= self.min_image_dim and height >= self.min_image_dim:
+                        img_ext = base_image.get("ext", "png")
+                        image_filename = f"page_{page_num}_fig_{img_index + 1}.{img_ext}"
+                        image_path = self.output_dir / image_filename
+                        with open(image_path, "wb") as f:
+                            f.write(base_image["image"])
+                        image_paths.append(str(image_path))
+                        total_images += 1
 
-                try:
-                    pil_img = Image.open(io.BytesIO(image_bytes))
-                    # Filter out tiny icon noise (arrows, bullet points, divider lines)
-                    if pil_img.width < MIN_IMAGE_WIDTH or pil_img.height < MIN_IMAGE_HEIGHT:
-                        continue
-                except Exception:
-                    continue
-
-                img_filename = f"page_{page_num + 1}_fig_{img_index + 1}.{image_ext}"
-                img_path = self.image_save_dir / img_filename
-
-                with open(img_path, "wb") as f:
-                    f.write(image_bytes)
-
-                extracted_images.append(str(img_path))
-                total_extracted_images += 1
-
-            # 2. Check for vector schematics/diagrams on sparse text pages
-            # If no raster images exist, but the page contains graphical drawings or exploded views
-            if not extracted_images and len(text) < 200:
-                pix = page.get_pixmap(dpi=150)
-                snapshot_filename = f"page_{page_num + 1}_schematic_snapshot.png"
-                snapshot_path = self.image_save_dir / snapshot_filename
-                pix.save(str(snapshot_path))
-                extracted_images.append(str(snapshot_path))
-                total_extracted_images += 1
+            # 2. Vector Schematic Fallback: If page has drawings/drawings rects but no raster images
+            drawings = page.get_drawings()
+            if not image_paths and len(drawings) > 10:
+                # Render high-res snapshot of page visual content
+                pix = page.get_pixmap(dpi=200)
+                image_filename = f"page_{page_num}_schematic.png"
+                image_path = self.output_dir / image_filename
+                pix.save(str(image_path))
+                image_paths.append(str(image_path))
+                total_images += 1
 
             pages_data.append({
-                "page_number": page_num + 1,
+                "page_number": page_num,
                 "text": text,
-                "image_paths": extracted_images,
-                "has_visuals": len(extracted_images) > 0,
-                "source_document": self.pdf_path.name
+                "image_paths": image_paths
             })
+
+        doc.close()
 
         return {
             "doc_id": self.doc_id,
             "filename": self.pdf_path.name,
-            "total_pages": len(self.doc),
-            "total_images_extracted": total_extracted_images,
+            "total_pages": len(pages_data),
+            "total_images_extracted": total_images,
             "pages": pages_data
         }

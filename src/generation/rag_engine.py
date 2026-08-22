@@ -1,5 +1,5 @@
 import requests
-from typing import Dict, Any
+from typing import Dict, Any, List
 from src.retrieval.vector_store import ManualVectorStore
 from src.config import OLLAMA_BASE_URL, OLLAMA_TEXT_MODEL, TOP_K_CHUNKS
 
@@ -21,20 +21,20 @@ class ManualyRAGEngine:
             "stream": False,
             "options": {
                 "temperature": 0.1,
-                "num_predict": 256  # Caps token length for fast inference
+                "num_predict": 400
             }
         }
         try:
-            res = requests.post(self.api_url, json=payload, timeout=240)
+            res = requests.post(self.api_url, json=payload, timeout=180)
             res.raise_for_status()
             return res.json().get("response", "").strip()
         except requests.exceptions.Timeout:
-            return "Generation timed out. Please retry with a more concise query."
+            return "Inference timed out. Please try again."
         except Exception as e:
             return f"LLM Error: {e}"
 
     def answer_question(self, query: str, user_id: str = "demo_user") -> Dict[str, Any]:
-        search_results = self.vector_store.search(query=query, user_id=user_id, top_k=TOP_K_CHUNKS)
+        search_results = self.vector_store.search(query=query, user_id=user_id, top_k=6)
         
         documents = search_results["documents"][0] if search_results["documents"] else []
         metadatas = search_results["metadatas"][0] if search_results["metadatas"] else []
@@ -47,7 +47,7 @@ class ManualyRAGEngine:
         citations = []
         evidence_images = []
 
-        visual_keywords = ["diagram", "figure", "schematic", "drawing", "picture", "image", "look like", "where is", "show"]
+        visual_keywords = ["diagram", "figure", "schematic", "drawing", "picture", "image", "look like", "where is", "show", "wiring", "pinout"]
         user_wants_visual = any(kw in query.lower() for kw in visual_keywords)
 
         for meta in metadatas:
@@ -61,13 +61,17 @@ class ManualyRAGEngine:
                     evidence_images.append(meta["image_path"])
 
         grounded_prompt = (
-            f"You are Manualy, an accurate assistant for product manuals.\n"
-            f"Context:\n{context_str}\n\n"
-            f"Question: {query}\n\n"
-            f"Rules:\n"
-            f"1. Answer concisely using ONLY the provided context.\n"
-            f"2. Cite the page number.\n"
-            f"3. If the answer is not in the context, output ONLY: OUT_OF_SCOPE."
+            f"You are Manualy, an expert technical manual assistant.\n"
+            f"Here is relevant context extracted from the manual (including text and diagram descriptions):\n"
+            f"---------------------\n"
+            f"{context_str}\n"
+            f"---------------------\n"
+            f"User Question: {query}\n\n"
+            f"Instructions:\n"
+            f"1. Carefully answer the question using facts from the context above.\n"
+            f"2. Cite the specific page number(s) where the answer is found.\n"
+            f"3. Only if the provided context contains zero relevant facts or references to answer the query, reply with: OUT_OF_SCOPE.\n\n"
+            f"Answer:"
         )
 
         llm_response = self._call_llm(grounded_prompt)
@@ -79,12 +83,12 @@ class ManualyRAGEngine:
             "status": "in_scope",
             "answer": llm_response,
             "citations": citations[:2],
-            "visual_evidence": evidence_images[:1],
+            "visual_evidence": evidence_images[:2],
             "best_distance": distances[0] if distances else None
         }
 
     def _handle_fallback(self, query: str) -> Dict[str, Any]:
-        prompt = f"The user asked: '{query}'. Provide a 2-sentence practical recommendation clearly noting it is general advice not from their manual."
+        prompt = f"The user asked: '{query}'. Provide a brief 2-sentence practical recommendation clearly noting it is general advice not found in their manual."
         suggestion = self._call_llm(prompt)
         return {
             "status": "out_of_scope",
