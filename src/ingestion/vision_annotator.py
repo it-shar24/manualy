@@ -14,6 +14,7 @@ class LocalVisionAnnotator:
         with Image.open(image_path) as img:
             if img.mode in ("RGBA", "P"):
                 img = img.convert("RGB")
+            # Downsample to 768px to ensure fast matrix multiplication on M-series chips
             img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
             buffer = io.BytesIO()
             img.save(buffer, format="JPEG", quality=80)
@@ -27,9 +28,10 @@ class LocalVisionAnnotator:
             base64_image = self._encode_and_resize_image(image_path)
             
             prompt = (
-                f"Extract structured technical data from '{doc_name}' Page {page_number}:\n"
-                f"1. Transcribe all text, numbers, labels, warnings, and part IDs verbatim.\n"
-                f"2. Brief 1-sentence description of component structure."
+                f"Exhaustive technical extraction for '{doc_name}' Page {page_number}:\n"
+                f"1. Transcribe ALL subtask numbers (e.g. SUBTASK 21-61-52-...), FSN ranges, warning texts, and callout IDs verbatim.\n"
+                f"2. Transcribe bolt specifications and differences (e.g., item numbers, LH vs RH, symbols) verbatim from tables.\n"
+                f"Output raw verbatim facts without extra conversational filler."
             )
 
             payload = {
@@ -39,13 +41,14 @@ class LocalVisionAnnotator:
                 "stream": False,
                 "options": {
                     "temperature": 0.0,
-                    "num_predict": 140,
+                    "num_predict": 220,
                     "num_ctx": 2048,
                     "num_thread": 4
                 }
             }
 
-            response = requests.post(self.api_url, json=payload, timeout=120)
+            # 240 second safety cushion prevents dropping calls
+            response = requests.post(self.api_url, json=payload, timeout=240)
             response.raise_for_status()
             return response.json().get("response", "").strip()
         except Exception as e:
