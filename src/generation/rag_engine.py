@@ -1,7 +1,8 @@
+import re
 import requests
 from typing import Dict, Any, List
 from src.retrieval.vector_store import ManualVectorStore
-from src.config import OLLAMA_BASE_URL, OLLAMA_TEXT_MODEL, TOP_K_CHUNKS
+from src.config import OLLAMA_BASE_URL, OLLAMA_TEXT_MODEL
 
 class ManualyRAGEngine:
     def __init__(
@@ -20,12 +21,12 @@ class ManualyRAGEngine:
             "prompt": prompt,
             "stream": False,
             "options": {
-                "temperature": 0.1,
-                "num_predict": 400
+                "temperature": 0.0,
+                "num_predict": 500
             }
         }
         try:
-            res = requests.post(self.api_url, json=payload, timeout=180)
+            res = requests.post(self.api_url, json=payload, timeout=120)
             res.raise_for_status()
             return res.json().get("response", "").strip()
         except requests.exceptions.Timeout:
@@ -33,66 +34,99 @@ class ManualyRAGEngine:
         except Exception as e:
             return f"LLM Error: {e}"
 
-    def answer_question(self, query: str, user_id: str = "demo_user") -> Dict[str, Any]:
-        search_results = self.vector_store.search(query=query, user_id=user_id, top_k=6)
+    def _resolve_numeric_ranges(self, query: str, context_str: str) -> str:
+        """Helper to resolve numeric values (e.g. FSN 250) against hyphenated ranges (e.g. 201-300)."""
+        numbers_in_query = re.findall(r"\b\d{2,4}\b", query)
+        range_matches = re.findall(r"(\d{2,4})\s*-\s*(\d{2,4})", context_str)
         
-        documents = search_results["documents"][0] if search_results["documents"] else []
-        metadatas = search_results["metadatas"][0] if search_results["metadatas"] else []
-        distances = search_results["distances"][0] if search_results["distances"] else []
+        hints = []
+        for num_str in numbers_in_query:
+            num = int(num_str)
+            for start_str, end_str in range_matches:
+                start, end = int(start_str), int(end_str)
+                if start <= num <= end:
+                    hints.append(f"Note: The query value '{num}' is covered within the range '{start_str}-{end_str}'.")
+        
+        return "\n".join(set(hints))
+
+    def answer_question(self, query: str, user_id: str = "demo_user", doc_id: str = None) -> Dict[str, Any]:
+        search_results = self.vector_store.search(query=query, user_id=user_id, top_k=10)
+        
+        raw_docs = search_results["documents"][0] if search_results.get("documents") else []
+        raw_metas = search_results["metadatas"][0] if search_results.get("metadatas") else []
+        raw_dists = search_results["distances"][0] if search_results.get("distances") else []
+
+        documents, metadatas, distances = [], [], []
+        for d, m, dist in zip(raw_docs, raw_metas, raw_dists):
+            if doc_id and m.get("doc_id") != doc_id:
+                continue
+            documents.append(d)
+            metadatas.append(m)
+            distances.append(dist)
 
         if not documents:
             return self._handle_fallback(query)
 
-        context_str = "\n\n---\n\n".join(documents)
-        citations = []
-        evidence_images = []
+        context_blocks = []
+        for idx, (doc, meta) in enumerate(zip(documents, metadatas)):
+            context_blocks.append(
+                f"[Source {idx+1}] (Page {meta.get('page_number')}, {meta.get('chunk_type')}):\n{doc}"
+            )
+        context_str = "\n\n".join(context_blocks)
+        
+        range_hints = self._resolve_numeric_ranges(query, context_str)
+        hint_section = f"\nNumerical Context Hints:\n{range_hints}\n" if range_hints else ""
 
-        visual_keywords = ["diagram", "figure", "schematic", "drawing", "picture", "image", "look like", "where is", "show", "wiring", "pinout"]
-        user_wants_visual = any(kw in query.lower() for kw in visual_keywords)
+        prompt = f"""You are a technical manual assistant for aviation and industrial equipment.
+Answer the user's question using ONLY the provided Context.{hint_section}
 
-        for meta in metadatas:
-            citations.append({
-                "document": meta.get("doc_name"),
-                "page": meta.get("page_number"),
-                "type": meta.get("chunk_type")
+CRITICAL RULES:
+1. Copy all SUBTASK numbers (e.g. SUBTASK 21-61-52-...), part numbers, and callouts verbatim.
+2. If a query value falls within a range in the context (e.g. FSN 250 in 201-300), describe the subtasks applicable to that range.
+3. If an effectivity range has multiple subtasks or differences, list all of them.
+4. End your response with the exact sources used (e.g., Sources Used: [Source 1], [Source 2]).
+
+Context:
+{context_str}
+
+User Question: {query}
+
+Answer:"""
+
+        llm_response = self._call_llm(prompt)
+
+        active_citations = []
+        visual_evidence = []
+        for idx, meta in enumerate(metadatas):
+            tag = f"Source {idx+1}"
+            if tag in llm_response:
+                active_citations.append({
+                    "document": meta.get("doc_name"),
+                    "page": meta.get("page_number"),
+                    "type": meta.get("chunk_type")
+                })
+                if meta.get("image_path") and meta["image_path"] not in visual_evidence:
+                    visual_evidence.append(meta["image_path"])
+
+        if not active_citations and metadatas:
+            active_citations.append({
+                "document": metadatas[0].get("doc_name"),
+                "page": metadatas[0].get("page_number"),
+                "type": metadatas[0].get("chunk_type")
             })
-            if (meta.get("chunk_type") == "diagram" or user_wants_visual) and meta.get("image_path"):
-                if meta["image_path"] not in evidence_images:
-                    evidence_images.append(meta["image_path"])
-
-        grounded_prompt = (
-            f"You are Manualy, an expert technical manual assistant.\n"
-            f"Here is relevant context extracted from the manual (including text and diagram descriptions):\n"
-            f"---------------------\n"
-            f"{context_str}\n"
-            f"---------------------\n"
-            f"User Question: {query}\n\n"
-            f"Instructions:\n"
-            f"1. Carefully answer the question using facts from the context above.\n"
-            f"2. Cite the specific page number(s) where the answer is found.\n"
-            f"3. Only if the provided context contains zero relevant facts or references to answer the query, reply with: OUT_OF_SCOPE.\n\n"
-            f"Answer:"
-        )
-
-        llm_response = self._call_llm(grounded_prompt)
-
-        if "OUT_OF_SCOPE" in llm_response:
-            return self._handle_fallback(query)
 
         return {
             "status": "in_scope",
             "answer": llm_response,
-            "citations": citations[:2],
-            "visual_evidence": evidence_images[:2],
+            "citations": active_citations,
+            "visual_evidence": visual_evidence,
             "best_distance": distances[0] if distances else None
         }
 
     def _handle_fallback(self, query: str) -> Dict[str, Any]:
-        prompt = f"The user asked: '{query}'. Provide a brief 2-sentence practical recommendation clearly noting it is general advice not found in their manual."
-        suggestion = self._call_llm(prompt)
         return {
             "status": "out_of_scope",
-            "answer": f"**The uploaded manual does not contain this specific information.**\n\n💡 *Suggestion:* {suggestion}",
+            "answer": "The uploaded manual does not contain this specific information.",
             "citations": [],
             "visual_evidence": []
         }
