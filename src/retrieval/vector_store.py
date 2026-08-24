@@ -1,12 +1,13 @@
 """
 vector_store.py
 ----------------
-Retrieval layer: hybrid dense (embedding) + sparse (BM25 keyword) search,
-fused with Reciprocal Rank Fusion, optionally hard-filtered by a
-deterministic numeric-range match, then reranked with a cross-encoder.
+Generic hybrid dense (embedding) + sparse (BM25 keyword) search with 
+Multi-Query Fusion, Reciprocal Rank Fusion, and Cross-Encoder Reranking.
+Zero hardcoding — fully generalized for arbitrary technical manuals.
 """
 
 import re
+import requests
 from typing import Any, Dict, List, Optional, Tuple
 
 import chromadb
@@ -19,8 +20,9 @@ from src.config import (
     DENSE_CANDIDATE_POOL,
     EMBEDDING_MODEL_NAME,
     RERANK_CANDIDATE_POOL,
-    RERANKER_MODEL_NAME,
     RRF_K,
+    OLLAMA_BASE_URL,
+    OLLAMA_TEXT_MODEL
 )
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+", re.IGNORECASE)
@@ -57,17 +59,46 @@ class ManualVectorStore:
             metadata={"hnsw:space": "cosine"},
         )
         self._reranker = None
+        self.ollama_url = f"{OLLAMA_BASE_URL}/api/generate"
 
     @property
     def reranker(self):
         if self._reranker is None:
             from sentence_transformers import CrossEncoder
-            # Uses RERANKER_MODEL_NAME if defined in config, or falls back to ms-marco-MiniLM-L-6-v2
-            model_to_load = globals().get("RERANKER_MODEL_NAME", "cross-encoder/ms-marco-MiniLM-L-6-v2")
-            if not model_to_load or model_to_load == "BAAI/bge-reranker-base":
-                model_to_load = "cross-encoder/ms-marco-MiniLM-L-6-v2"
-            self._reranker = CrossEncoder(model_to_load, max_length=512)
+            self._reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2", max_length=512)
         return self._reranker
+
+    def _generate_generic_expansions(self, query: str) -> List[str]:
+        """
+        Generic, zero-shot query expansion via local LLM.
+        Converts conversational phrasing into technical manual terminology.
+        """
+        prompt = f"""You are a search query optimizer for technical product documentation and user manuals.
+Given this user question, output 2 alternative technical search queries or spec-sheet terms that might appear in a manual index or table.
+Write ONLY the 2 queries separated by a newline. No numbers, no bullet points, no commentary.
+
+Question: {query}
+Technical Queries:"""
+
+        payload = {
+            "model": OLLAMA_TEXT_MODEL,
+            "prompt": prompt,
+            "stream": False,
+            "options": {"temperature": 0.1, "num_predict": 60}
+        }
+        queries = [query]
+        try:
+            res = requests.post(self.ollama_url, json=payload, timeout=5)
+            if res.status_code == 200:
+                lines = res.json().get("response", "").strip().split("\n")
+                for line in lines:
+                    cleaned = re.sub(r"^[\d\.\-\*\s]+", "", line).strip()
+                    if cleaned and len(cleaned) > 3:
+                        queries.append(cleaned)
+        except Exception:
+            pass  # Fall back cleanly to original query if LLM service is busy
+        
+        return queries[:3]
 
     def index_chunks(self, chunks: List[Dict[str, Any]]):
         if not chunks:
@@ -111,20 +142,16 @@ class ManualVectorStore:
 
     def _reciprocal_rank_fusion(
         self,
-        dense_results: List[Tuple[str, str, dict]],
-        bm25_results: List[Tuple[str, str, dict]],
+        ranked_lists: List[List[Tuple[str, str, dict]]],
         k: int = RRF_K,
     ) -> List[Tuple[str, str, dict, float]]:
         scores: Dict[str, float] = {}
         payload: Dict[str, Tuple[str, str, dict]] = {}
 
-        for rank, (cid, doc, meta) in enumerate(dense_results):
-            scores[cid] = scores.get(cid, 0.0) + 1.0 / (k + rank + 1)
-            payload[cid] = (cid, doc, meta)
-
-        for rank, (cid, doc, meta) in enumerate(bm25_results):
-            scores[cid] = scores.get(cid, 0.0) + 1.0 / (k + rank + 1)
-            payload[cid] = (cid, doc, meta)
+        for r_list in ranked_lists:
+            for rank, (cid, doc, meta) in enumerate(r_list):
+                scores[cid] = scores.get(cid, 0.0) + 1.0 / (k + rank + 1)
+                payload[cid] = (cid, doc, meta)
 
         fused = [(payload[cid][0], payload[cid][1], payload[cid][2], score) for cid, score in scores.items()]
         fused.sort(key=lambda x: x[3], reverse=True)
@@ -177,12 +204,25 @@ class ManualVectorStore:
         return results
 
     def search(self, query: str, user_id: str = "demo_user", doc_id: Optional[str] = None, top_k: int = 8) -> List[Dict[str, Any]]:
-        dense = self._dense_search(query, user_id, doc_id, n=DENSE_CANDIDATE_POOL)
-        bm25 = self._bm25_search(query, user_id, doc_id, n=BM25_CANDIDATE_POOL)
+        # 1. Zero-shot generic query variations
+        query_variants = self._generate_generic_expansions(query)
 
-        if not dense and not bm25:
+        # 2. Multi-Query Retrieval
+        retrieval_lists: List[List[Tuple[str, str, dict]]] = []
+        for q_var in query_variants:
+            dense = self._dense_search(q_var, user_id, doc_id, n=DENSE_CANDIDATE_POOL)
+            bm25 = self._bm25_search(q_var, user_id, doc_id, n=BM25_CANDIDATE_POOL)
+            if dense:
+                retrieval_lists.append(dense)
+            if bm25:
+                retrieval_lists.append(bm25)
+
+        if not retrieval_lists:
             return []
 
-        fused = self._reciprocal_rank_fusion(dense, bm25)
+        # 3. RRF Fusion across all dense + BM25 streams
+        fused = self._reciprocal_rank_fusion(retrieval_lists)
         filtered = self._apply_range_filter(fused, query)
+        
+        # 4. Rerank jointly against the original user query
         return self._rerank(query, filtered, top_k)

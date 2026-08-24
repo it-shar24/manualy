@@ -4,32 +4,48 @@ from typing import List, Dict, Any
 
 class HybridManualChunker:
     """
-    Strategy 2 Enhanced: Structure-Aware with Contextual Chunk Enrichment.
-    Prepends hierarchical breadcrumbs (Document > Section > Context) to prevent
-    isolated spec lines and tables from losing semantic relevance.
+    Strategy 2 (Enhanced): Structure-Aware + Table Header Column Preservation.
+    Attaches table headers to individual rows/row-groups and injects fine-grained
+    structural breadcrumbs to maximize MRR and Context Precision.
     """
-    def __init__(self, max_section_chars: int = 2500):
+    def __init__(self, max_section_chars: int = 2200):
         self.max_section_chars = max_section_chars
 
     def _hash_content(self, text: str) -> str:
         return hashlib.sha256(text.strip().lower().encode("utf-8")).hexdigest()
 
     def _extract_section_title(self, text: str) -> str:
-        """Extracts the first heading or section identifier from a block of text."""
         lines = [line.strip() for line in text.split("\n") if line.strip()]
         if not lines:
             return "General Information"
-        
         first_line = lines[0]
-        # Match Markdown headers (# Section), numbered headers (1.1 Title), or ALL CAPS headers
         match = re.match(r"^(?:#{1,4}\s+|\d+(?:\.\d+)*\s+)?([A-Za-z0-9\s\-–—/&()]{3,60})", first_line)
         if match:
             return match.group(1).strip()
         return first_line[:50]
 
+    def _format_table_content(self, table_text: str) -> str:
+        """Ensures markdown tables retain clear column headers and row definitions."""
+        lines = [ln.strip() for ln in table_text.split("\n") if ln.strip()]
+        if len(lines) < 2 or "|" not in lines[0]:
+            return table_text
+        
+        header = lines[0]
+        rows = [ln for ln in lines[1:] if not re.match(r"^\|?[\s\-:|]+\|?$", ln)]
+        
+        # If the table is long (> 15 rows), group rows with the header attached
+        if len(rows) > 12:
+            formatted_chunks = []
+            chunk_size = 8
+            for i in range(0, len(rows), chunk_size):
+                sub_rows = rows[i:i + chunk_size]
+                formatted_chunks.append(header + "\n|---|---|\n" + "\n".join(sub_rows))
+            return "\n\n".join(formatted_chunks)
+        return table_text
+
     def _split_into_structural_sections(self, text: str) -> List[Dict[str, Any]]:
-        # Match markdown headers, numbered sections, or major all-caps section divisions
-        header_pattern = r"(?=(?:^#{1,4}\s+|\n(?=\d+\.\d+\s+[A-Z])|\n(?=\d+\s+[A-Z][A-Za-z\s]{3,30}\n)))"
+        # Split on markdown headings, numbered sections (e.g. 1.2 Title), or uppercase section names
+        header_pattern = r"(?=(?:^#{1,4}\s+|\n(?=\d+\.\d+\s+[A-Z])|\n(?=\d+\s+[A-Z][A-Za-z\s]{3,30}\n)|\n(?=Table\s+\d+:?)))"
         raw_sections = re.split(header_pattern, text, flags=re.MULTILINE)
         
         structured_blocks = []
@@ -44,10 +60,16 @@ class HybridManualChunker:
             if extracted_title:
                 current_section_title = extracted_title
 
-            # Preserve markdown tables intact
             is_table = "|" in sec_clean and len([ln for ln in sec_clean.split("\n") if "|" in ln]) >= 2
 
-            if len(sec_clean) > self.max_section_chars and not is_table:
+            if is_table:
+                formatted_body = self._format_table_content(sec_clean)
+                structured_blocks.append({
+                    "section_title": f"Table: {current_section_title}",
+                    "body": formatted_body,
+                    "is_table": True
+                })
+            elif len(sec_clean) > self.max_section_chars:
                 paragraphs = sec_clean.split("\n\n")
                 buffer = ""
                 for p in paragraphs:
@@ -71,7 +93,7 @@ class HybridManualChunker:
                 structured_blocks.append({
                     "section_title": current_section_title,
                     "body": sec_clean,
-                    "is_table": is_table
+                    "is_table": False
                 })
 
         return structured_blocks
@@ -96,9 +118,8 @@ class HybridManualChunker:
                 body = block["body"]
                 content_type = "table" if block["is_table"] else "text"
 
-                # Prepend contextual header breadcrumbs
                 enriched_content = (
-                    f"[{doc_display_name} > Section: {section_title} | Page {page_num}]\n"
+                    f"[{doc_display_name} > {section_title} | Page {page_num}]\n"
                     f"{body}"
                 )
 
