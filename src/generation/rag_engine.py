@@ -111,10 +111,10 @@ class ManualyRAGEngine:
         prompt = f"""You are a precise technical manual assistant. Answer the question using ONLY the provided sources.
 
 Rules:
-1. Extract exact values, pin names, part numbers, and specifications directly from the context.
-2. Do not extrapolate or introduce external facts.
-3. Keep the answer direct, factual, and concise (1-3 sentences or direct bullet points).
-4. If the information is not present in the sources, output exactly: "The provided manual excerpts do not contain this information."
+1. Extract exact values, pin names, part numbers, and specifications directly from the sources.
+2. Do not extrapolate, assume, or introduce external facts.
+3. Provide a direct, factual answer in 1-2 sentences or concise bullet points.
+4. If the information is not present in the sources, reply: "The provided manual excerpts do not contain this information."
 
 Sources:
 {context_str}
@@ -123,7 +123,7 @@ Question: {query}
 
 Answer:"""
 
-        llm_response = self._call_llm(prompt)
+        llm_response = self._call_llm(prompt).strip()
 
         citations = [
             {
