@@ -61,3 +61,31 @@ Retrieval Recall@3:          75.0%
 Mean Reciprocal Rank (MRR):  0.725
 Context Precision:           72.5%
 ==================================================
+
+
+
+## 3. Production Benchmark Report
+
+==================================================
+  STRATEGY 2 (ENRICHED STRUCTURE-AWARE) BENCHMARK REPORT
+==================================================
+Total Benchmark Queries:     20
+Retrieval Recall@3:          95.0%
+Mean Reciprocal Rank (MRR):  0.858
+Context Precision:           76.2%
+==================================================
+
+
+##  End-to-End Generation Benchmark (Strategy 2 + Llama-3.2:3b)
+
+==================================================
+      END-TO-END RAG BENCHMARK REPORT
+==================================================
+Total Benchmark Queries:     20
+Retrieval Recall@3:          95.0%
+Mean Reciprocal Rank (MRR):  0.858
+Context Precision:           76.2%
+--------------------------------------------------
+Answer Faithfulness:         45.0%
+Answer Correctness:          50.0%
+==================================================
