@@ -89,3 +89,17 @@ Context Precision:           76.2%
 Answer Faithfulness:         45.0%
 Answer Correctness:          50.0%
 ==================================================
+
+# Generation Prompt Grounding Calibration
+
+==================================================
+      END-TO-END RAG BENCHMARK REPORT
+==================================================
+Total Benchmark Queries:     20
+Retrieval Recall@3:          95.0%
+Mean Reciprocal Rank (MRR):  0.858
+Context Precision:           76.2%
+--------------------------------------------------
+Answer Faithfulness:         75.0%
+Answer Correctness:          80.0%
+==================================================

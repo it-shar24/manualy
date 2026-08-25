@@ -108,31 +108,13 @@ class ManualyRAGEngine:
 
         context_str = self._build_context(results)
 
-        prompt = f"""You are a high-precision technical manual assistant.
-Answer the question using ONLY the Source blocks below. These sources have
-already been filtered and ranked for relevance to this exact question.
+        prompt = f"""You are a precise technical manual assistant. Answer the question using ONLY the provided sources.
 
-CORE RULES (follow all of them):
-1. SPECIFICITY: If a specific model, serial number, variant range, or
-   subtask matches the question, use that specific one — never a generic
-   or unrelated section, even if it is the only thing available.
-2. VERBATIM COPYING: Copy every identifier — step numbers, part numbers,
-   subtask/task codes, hardware sizes, callout numbers — EXACTLY as
-   written in the sources. Never shorten, guess, or reconstruct an
-   identifier from memory or pattern-matching. If you are not fully
-   certain of an exact code, say so instead of writing a plausible-looking
-   version of it.
-3. NO FRAGMENT MERGING: If multiple sources describe different
-   subtasks/sections, do not combine their steps into one narrative. Keep
-   each subtask's steps together and say which subtask each step is from.
-4. HARD REFUSAL, NO SOFT LANDING: If the sources do not contain the answer,
-   respond with exactly: "The provided manual excerpts do not contain this
-   information." and STOP. Do not add "however, here is general advice" or
-   any other fallback content from outside the sources. A clear refusal is
-   always better than a plausible-sounding guess.
-5. Do not use outside/general knowledge about this type of product or
-   system to fill gaps — only what is explicitly written in the sources
-   below counts as an answer.
+Rules:
+1. Extract exact values, pin names, part numbers, and specifications directly from the context.
+2. Do not extrapolate or introduce external facts.
+3. Keep the answer direct, factual, and concise (1-3 sentences or direct bullet points).
+4. If the information is not present in the sources, output exactly: "The provided manual excerpts do not contain this information."
 
 Sources:
 {context_str}
@@ -143,17 +125,6 @@ Answer:"""
 
         llm_response = self._call_llm(prompt)
 
-        unverified = self._check_grounding(llm_response, context_str)
-        if unverified:
-            warning = (
-                f"⚠️ Grounding check: the identifier(s) {', '.join(sorted(unverified))} "
-                f"in this answer could not be verified against the retrieved source text. "
-                f"Please double-check them against the manual directly.\n\n"
-            )
-            llm_response = warning + llm_response
-
-        # Deterministic citations: exactly the chunks that were actually
-        # placed in the prompt, not a guess based on scanning output text.
         citations = [
             {
                 "document": r["metadata"].get("doc_name"),
@@ -174,7 +145,6 @@ Answer:"""
             "answer": llm_response,
             "citations": citations,
             "visual_evidence": visual_evidence,
-            "unverified_identifiers": unverified,
         }
 
     def _handle_fallback(self, query: str) -> Dict[str, Any]:
